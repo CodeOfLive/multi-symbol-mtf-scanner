@@ -1,0 +1,340 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © 2025 Efekan Ömer FİDAN (fidansoftware)
+//
+// Multi-Symbol MTF Scanner — v11 (no modes, full control)
+//@version=6
+indicator("v11 Confluence Strategy v1.1", overlay=true)
+
+// ══════════════════════════════════════════════════════════════
+// FUNCTIONS
+// ══════════════════════════════════════════════════════════════
+
+ma_calc(float src, simple int len, simple string ma_type) =>
+    float result = na
+    if ma_type == "SMA"
+        result := ta.sma(src, len)
+    else if ma_type == "EMA"
+        result := ta.ema(src, len)
+    else if ma_type == "WMA"
+        result := ta.wma(src, len)
+    else if ma_type == "HMA"
+        result := ta.hma(src, len)
+    else if ma_type == "RMA"
+        result := ta.rma(src, len)
+    else if ma_type == "VWMA"
+        result := ta.vwma(src, len)
+    else if ma_type == "DEMA"
+        e1 = ta.ema(src, len)
+        result := 2 * e1 - ta.ema(e1, len)
+    else if ma_type == "TMA"
+        result := ta.sma(ta.sma(src, math.ceil(len / 2)), math.floor(len / 2) + 1)
+    else if ma_type == "LSMA"
+        result := 3 * ta.wma(src, len) - 2 * ta.sma(src, len)
+    else if ma_type == "ZLEMA"
+        int lag = int(len / 2)
+        ema_data = src + src - src[lag]
+        result := ta.ema(ema_data, len)
+    else if ma_type == "TSF"
+        lrc  = ta.linreg(src, len, 0)
+        lrc1 = ta.linreg(src, len, 1)
+        result := lrc + (lrc - lrc1)
+    result
+
+fmt(float v) => na(v) ? "—" : str.tostring(v, "#.##")
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS — MA
+// ══════════════════════════════════════════════════════════════
+
+grp_ma = "Moving Averages"
+ma1_enabled = input.bool(true, "MA 1 (fast)", group=grp_ma, inline="ma1")
+ma1_tf      = input.timeframe("5",  "TF",   group=grp_ma, inline="ma1")
+ma1_type    = input.string("EMA",   "Type", options=["SMA","EMA","WMA","HMA","RMA","VWMA","DEMA","TMA","LSMA","ZLEMA","TSF"], group=grp_ma, inline="ma1")
+ma1_len     = input.int(12, "Len", minval=1, group=grp_ma, inline="ma1")
+ma1_color   = input.color(color.purple, "Color", group=grp_ma, inline="ma1")
+
+ma2_enabled = input.bool(true, "MA 2 (slow)", group=grp_ma, inline="ma2")
+ma2_tf      = input.timeframe("15", "TF",   group=grp_ma, inline="ma2")
+ma2_type    = input.string("EMA",   "Type", options=["SMA","EMA","WMA","HMA","RMA","VWMA","DEMA","TMA","LSMA","ZLEMA","TSF"], group=grp_ma, inline="ma2")
+ma2_len     = input.int(26, "Len", minval=1, group=grp_ma, inline="ma2")
+ma2_color   = input.color(color.orange, "Color", group=grp_ma, inline="ma2")
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS — MOMENTUM
+// ══════════════════════════════════════════════════════════════
+
+grp_rsi = "RSI (Momentum)"
+rsi_len        = input.int(14, "Length", minval=2, maxval=200, group=grp_rsi, inline="r1")
+rsi_bull_level = input.int(50, "Bull ≥", minval=30, maxval=70, group=grp_rsi, inline="r2")
+rsi_bear_level = input.int(50, "Bear ≤", minval=30, maxval=70, group=grp_rsi, inline="r2")
+
+grp_macd = "MACD (Momentum Change)"
+macd_fast    = input.int(12, "Fast",   minval=1, group=grp_macd, inline="m1")
+macd_slow    = input.int(26, "Slow",   minval=1, group=grp_macd, inline="m1")
+macd_sig_len = input.int(9,  "Signal", minval=1, group=grp_macd, inline="m1")
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS — SIGNAL LOGIC
+// ══════════════════════════════════════════════════════════════
+
+grp_sig = "Signal Logic"
+strict_mode = input.bool(false, "Strict (3/3 required)", group=grp_sig,
+     tooltip="ON = all 3 must agree. OFF = 2 of 3 (default).")
+lookback    = input.int(1, "Signal Lookback (bars)", minval=1, maxval=200, group=grp_sig,
+     tooltip="Signal stays active for N bars after cross.")
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS — BANDS + TP/SL
+// ══════════════════════════════════════════════════════════════
+
+grp_band = "Security Band Settings"
+band_enabled  = input.bool(true, "Enable Bands", group=grp_band)
+band_mode     = input.string("3bar", "Band Mode", options=["C-O","H-L","AFP-UFP","3bar"], group=grp_band)
+band_up_color = input.color(color.green, "Upper Band Color", group=grp_band)
+band_dn_color = input.color(color.red,   "Lower Band Color", group=grp_band)
+
+grp_aski = "Targets & Stop Loss"
+sl_enabled    = input.bool(true, "Stop Loss", group=grp_aski, inline="sl")
+sl_atr_len    = input.int(14, "ATR Len", minval=1, group=grp_aski, inline="sl")
+sl_atr_mult   = input.float(1.5, "ATR ×", minval=0.1, maxval=10, step=0.1, group=grp_aski, inline="sl")
+tp1_enabled   = input.bool(true, "Target 1", group=grp_aski, inline="tp1")
+tp1_r_mult    = input.float(1.0, "R ×", minval=0.1, maxval=10, step=0.1, group=grp_aski, inline="tp1")
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS — TABLE / SCAN / SYMBOLS
+// ══════════════════════════════════════════════════════════════
+
+grp_table = "Table Settings"
+table_enabled  = input.bool(true, "Show Table", group=grp_table)
+table_size_str = input.string("Tiny", "Size", options=["Tiny","Small","Normal","Large","Huge","Auto"], group=grp_table)
+table_pos_str  = input.string("Top Right", "Position",
+     options=["Top Right","Middle Right","Bottom Right",
+              "Top Center","Middle Center","Bottom Center",
+              "Top Left","Middle Left","Bottom Left"], group=grp_table)
+
+table_bg     = input.color(color.new(color.blue, 60), "Background",   group=grp_table)
+table_header = input.color(color.new(color.blue, 20), "Header",       group=grp_table)
+table_text   = input.color(color.white,               "Text",         group=grp_table)
+table_border = input.color(color.new(color.blue, 40), "Border",       group=grp_table)
+table_frame  = input.color(color.new(color.blue, 20), "Frame",        group=grp_table)
+border_width = input.int(1, "Border Width", minval=0, maxval=5, group=grp_table)
+frame_width  = input.int(2, "Frame Width",  minval=0, maxval=9, group=grp_table)
+
+grp_scan = "Scan Settings"
+scan_tf = input.timeframe("5", "Scan Timeframe", group=grp_scan)
+
+grp_sym = "Symbols"
+s01 = input.symbol("BIST:THYAO", group=grp_sym)
+s02 = input.symbol("BIST:ASELS", group=grp_sym)
+s03 = input.symbol("BIST:GARAN", group=grp_sym)
+s04 = input.symbol("BIST:EREGL", group=grp_sym)
+s05 = input.symbol("BIST:KCHOL", group=grp_sym)
+s06 = input.symbol("BIST:TUPRS", group=grp_sym)
+s07 = input.symbol("BIST:AKBNK", group=grp_sym)
+s08 = input.symbol("BIST:YKBNK", group=grp_sym)
+
+// ══════════════════════════════════════════════════════════════
+// CHART MAs
+// ══════════════════════════════════════════════════════════════
+
+chart_ma1 = request.security(syminfo.tickerid, ma1_tf, ma_calc(close, ma1_len, ma1_type), ignore_invalid_symbol=true)
+chart_ma2 = request.security(syminfo.tickerid, ma2_tf, ma_calc(close, ma2_len, ma2_type), ignore_invalid_symbol=true)
+
+plot(ma1_enabled ? chart_ma1 : na, "MA1", color=ma1_color, linewidth=2, force_overlay=true)
+plot(ma2_enabled ? chart_ma2 : na, "MA2", color=ma2_color, linewidth=2, force_overlay=true)
+plot(na, "Dummy", display=display.none)
+
+// ══════════════════════════════════════════════════════════════
+// CHART CROSS + BANDS + TP/SL
+// ══════════════════════════════════════════════════════════════
+
+ma1 = chart_ma1
+ma2 = chart_ma2
+
+c1_cross = ta.cross(ma1, ma2)
+c1_up    = ta.crossover(ma1, ma2)
+c1_dn    = ta.crossunder(ma1, ma2)
+
+bars_since_cross_chart = ta.barssince(c1_up or c1_dn)
+chart_active = band_enabled and nz(bars_since_cross_chart, 9999) <= lookback
+
+band_up_3bar = ta.highest(close, 3)
+band_dn_3bar = ta.lowest(open, 3)
+
+band_upper = switch band_mode
+    "C-O"     => math.max(close, open)
+    "H-L"     => high
+    "AFP-UFP" => (high + math.max(close, open)) / 2
+    "3bar"    => band_up_3bar
+    => na
+band_lower = switch band_mode
+    "C-O"     => math.min(close, open)
+    "H-L"     => low
+    "AFP-UFP" => (low + math.min(close, open)) / 2
+    "3bar"    => band_dn_3bar
+    => na
+
+plot(chart_active ? band_upper : na, "Upper Band", color=band_up_color, style=plot.style_circles, force_overlay=true)
+plot(chart_active ? band_lower : na, "Lower Band", color=band_dn_color, style=plot.style_circles, force_overlay=true)
+
+chart_atr   = ta.atr(sl_atr_len)
+chart_entry = band_upper
+chart_sl    = chart_entry - (chart_atr * sl_atr_mult)
+chart_r     = chart_entry - chart_sl
+chart_tp1   = chart_entry + (chart_r * tp1_r_mult)
+
+plot(chart_active and sl_enabled  ? chart_sl  : na, "SL",  color=color.red,   style=plot.style_circles, force_overlay=true, linewidth=2)
+plot(chart_active and tp1_enabled ? chart_tp1 : na, "TP1", color=color.green, style=plot.style_circles, force_overlay=true, linewidth=1)
+// ══════════════════════════════════════════════════════════════
+// SCAN PAYLOAD
+// ══════════════════════════════════════════════════════════════
+
+scan_output() =>
+    _ma1 = ma_calc(close, ma1_len, ma1_type)
+    _ma2 = ma_calc(close, ma2_len, ma2_type)
+    _rsi = ta.rsi(close, rsi_len)
+    [_macd_line, _macd_sig, _] = ta.macd(close, macd_fast, macd_slow, macd_sig_len)
+    _hist = _macd_line - _macd_sig
+
+    _cross_up = ta.crossover(_ma1, _ma2)
+    _cross_dn = ta.crossunder(_ma1, _ma2)
+    _bars_since = ta.barssince(_cross_up or _cross_dn)
+    _active = nz(_bars_since, 9999) <= lookback
+
+    _rsi_ok  = (_cross_up and _rsi > rsi_bull_level) or (_cross_dn and _rsi < rsi_bear_level)
+    _macd_ok = (_cross_up and _hist > 0)             or (_cross_dn and _hist < 0)
+    _count_ok = (_rsi_ok ? 1 : 0) + (_macd_ok ? 1 : 0)
+
+    _status = not _active ? 0 : strict_mode ? (_count_ok == 2 ? 3 : 0) : _count_ok == 2 ? 3 : _count_ok == 1 ? 2 : 1
+
+    // [FIX] TP/SL only shown if status > 0 (i.e., valid signal exists)
+    _valid = _status > 0
+
+    _bu3 = ta.highest(close, 3)
+    _bu = switch band_mode
+        "C-O"     => math.max(close, open)
+        "H-L"     => high
+        "AFP-UFP" => (high + math.max(close, open)) / 2
+        "3bar"    => _bu3
+        => na
+
+    _atr   = ta.atr(sl_atr_len)
+    _entry = _bu
+    _sl    = _entry - (_atr * sl_atr_mult)
+    _r     = _entry - _sl
+    _tp1   = _entry + (_r * tp1_r_mult)
+
+    _sl_out  = sl_enabled  and _valid ? _sl  : na
+    _tp1_out = tp1_enabled and _valid ? _tp1 : na
+
+    [_ma1, _ma2, _rsi, _hist, _status, _tp1_out, _sl_out, close]
+
+// ══════════════════════════════════════════════════════════════
+// SCAN 8 SYMBOLS
+// ══════════════════════════════════════════════════════════════
+
+[m1_01, m2_01, rsi_01, hist_01, st_01, tp1_01, sl_01, pr_01] = request.security(s01, scan_tf, scan_output(), ignore_invalid_symbol=true)
+[m1_02, m2_02, rsi_02, hist_02, st_02, tp1_02, sl_02, pr_02] = request.security(s02, scan_tf, scan_output(), ignore_invalid_symbol=true)
+[m1_03, m2_03, rsi_03, hist_03, st_03, tp1_03, sl_03, pr_03] = request.security(s03, scan_tf, scan_output(), ignore_invalid_symbol=true)
+[m1_04, m2_04, rsi_04, hist_04, st_04, tp1_04, sl_04, pr_04] = request.security(s04, scan_tf, scan_output(), ignore_invalid_symbol=true)
+[m1_05, m2_05, rsi_05, hist_05, st_05, tp1_05, sl_05, pr_05] = request.security(s05, scan_tf, scan_output(), ignore_invalid_symbol=true)
+[m1_06, m2_06, rsi_06, hist_06, st_06, tp1_06, sl_06, pr_06] = request.security(s06, scan_tf, scan_output(), ignore_invalid_symbol=true)
+[m1_07, m2_07, rsi_07, hist_07, st_07, tp1_07, sl_07, pr_07] = request.security(s07, scan_tf, scan_output(), ignore_invalid_symbol=true)
+[m1_08, m2_08, rsi_08, hist_08, st_08, tp1_08, sl_08, pr_08] = request.security(s08, scan_tf, scan_output(), ignore_invalid_symbol=true)
+
+// ══════════════════════════════════════════════════════════════
+// PACK INTO ARRAYS
+// ══════════════════════════════════════════════════════════════
+
+sym_arr   = array.from(s01, s02, s03, s04, s05, s06, s07, s08)
+ma1_arr   = array.from(m1_01, m1_02, m1_03, m1_04, m1_05, m1_06, m1_07, m1_08)
+ma2_arr   = array.from(m2_01, m2_02, m2_03, m2_04, m2_05, m2_06, m2_07, m2_08)
+rsi_arr   = array.from(rsi_01, rsi_02, rsi_03, rsi_04, rsi_05, rsi_06, rsi_07, rsi_08)
+hist_arr  = array.from(hist_01, hist_02, hist_03, hist_04, hist_05, hist_06, hist_07, hist_08)
+st_arr    = array.from(st_01, st_02, st_03, st_04, st_05, st_06, st_07, st_08)
+tp1_arr   = array.from(tp1_01, tp1_02, tp1_03, tp1_04, tp1_05, tp1_06, tp1_07, tp1_08)
+sl_arr    = array.from(sl_01,  sl_02,  sl_03,  sl_04,  sl_05,  sl_06,  sl_07,  sl_08)
+price_arr = array.from(pr_01,  pr_02,  pr_03,  pr_04,  pr_05,  pr_06,  pr_07,  pr_08)
+
+// ══════════════════════════════════════════════════════════════
+// SIGNAL LABEL
+// ══════════════════════════════════════════════════════════════
+
+signal_label(float st) =>
+    int s = int(nz(st, 0))
+    switch s
+        3 => "🟢 STRONG"
+        2 => "🟡 MEDIUM"
+        1 => "⚪ WEAK"
+        => "—"
+
+// ══════════════════════════════════════════════════════════════
+// TABLE
+// ══════════════════════════════════════════════════════════════
+
+table_size = switch table_size_str
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+    "Huge"   => size.huge
+    => size.auto
+
+table_pos = switch table_pos_str
+    "Top Right"     => position.top_right
+    "Middle Right"  => position.middle_right
+    "Bottom Right"  => position.bottom_right
+    "Top Center"    => position.top_center
+    "Middle Center" => position.middle_center
+    "Bottom Center" => position.bottom_center
+    "Top Left"      => position.top_left
+    "Middle Left"   => position.middle_left
+    "Bottom Left"   => position.bottom_left
+
+var table tbl = table.new(table_pos, 9, 9, bgcolor=table_bg,
+     border_color=table_border, border_width=border_width,
+     frame_color=table_frame, frame_width=frame_width)
+
+if table_enabled and barstate.islast
+    table.cell(tbl, 0, 0, "Symbol", text_color=table_text, text_size=table_size, bgcolor=table_header)
+    table.cell(tbl, 1, 0, "MA 1",   text_color=table_text, text_size=table_size, bgcolor=table_header)
+    table.cell(tbl, 2, 0, "MA 2",   text_color=table_text, text_size=table_size, bgcolor=table_header)
+    table.cell(tbl, 3, 0, "RSI",    text_color=table_text, text_size=table_size, bgcolor=table_header)
+    table.cell(tbl, 4, 0, "MACD H", text_color=table_text, text_size=table_size, bgcolor=table_header)
+    table.cell(tbl, 5, 0, "Price",  text_color=table_text, text_size=table_size, bgcolor=table_header)
+    table.cell(tbl, 6, 0, "TP1",    text_color=table_text, text_size=table_size, bgcolor=table_header)
+    table.cell(tbl, 7, 0, "SL",     text_color=table_text, text_size=table_size, bgcolor=table_header)
+    table.cell(tbl, 8, 0, "Signal", text_color=table_text, text_size=table_size, bgcolor=table_header)
+
+    for i = 0 to 7
+        row = i + 1
+        table.cell(tbl, 0, row, str.tostring(array.get(sym_arr,   i)), text_color=table_text, text_size=table_size, bgcolor=table_bg)
+        table.cell(tbl, 1, row, fmt(array.get(ma1_arr,   i)),          text_color=table_text, text_size=table_size, bgcolor=table_bg)
+        table.cell(tbl, 2, row, fmt(array.get(ma2_arr,   i)),          text_color=table_text, text_size=table_size, bgcolor=table_bg)
+        table.cell(tbl, 3, row, fmt(array.get(rsi_arr,   i)),          text_color=table_text, text_size=table_size, bgcolor=table_bg)
+        table.cell(tbl, 4, row, fmt(array.get(hist_arr,  i)),          text_color=table_text, text_size=table_size, bgcolor=table_bg)
+        table.cell(tbl, 5, row, fmt(array.get(price_arr, i)),          text_color=table_text, text_size=table_size, bgcolor=table_bg)
+        table.cell(tbl, 6, row, fmt(array.get(tp1_arr,   i)),          text_color=table_text, text_size=table_size, bgcolor=table_bg)
+        table.cell(tbl, 7, row, fmt(array.get(sl_arr,    i)),          text_color=table_text, text_size=table_size, bgcolor=table_bg)
+        table.cell(tbl, 8, row, signal_label(array.get(st_arr, i)),    text_color=table_text, text_size=table_size, bgcolor=table_bg)
+
+
+// ══════════════════════════════════════════════════════════════
+// ALERTS — chart symbol only
+// ══════════════════════════════════════════════════════════════
+chart_rsi = ta.rsi(close, rsi_len)
+[chart_macd_line, chart_macd_sig, chart_hist] = ta.macd(close, macd_fast, macd_slow, macd_sig_len)
+
+chart_cross_up   = ta.crossover(chart_ma1, chart_ma2)
+chart_cross_dn   = ta.crossunder(chart_ma1, chart_ma2)
+chart_has_cross  = chart_cross_up or chart_cross_dn
+
+chart_rsi_ok  = (chart_cross_up and chart_rsi > rsi_bull_level) or (chart_cross_dn and chart_rsi < rsi_bear_level)
+chart_macd_ok = (chart_cross_up and chart_hist > 0)             or (chart_cross_dn and chart_hist < 0)
+chart_count   = (chart_rsi_ok ? 1 : 0) + (chart_macd_ok ? 1 : 0)
+
+chart_strong_signal = chart_has_cross and chart_count == 2
+chart_any_signal    = chart_has_cross and chart_count >= 1
+
+alertcondition(chart_strong_signal, title="STRONG Signal", message="STRONG signal on {{ticker}} @ {{close}}")
+alertcondition(chart_any_signal,    title="Any Signal",    message="Signal on {{ticker}} @ {{close}}")
